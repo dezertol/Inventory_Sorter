@@ -2,19 +2,30 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Callable
 
 from .hashutil import sha256_file
 from .models import Action, PlanItem, Status, TransferResult
 
 COPY_CHUNK_SIZE = 1024 * 1024
+ProgressCallback = Callable[[str, int, int], None]
 
 
-def apply_plan_item(item: PlanItem, verbose: bool = False) -> TransferResult:
+def apply_plan_item(
+    item: PlanItem,
+    verbose: bool = False,
+    progress_callback: ProgressCallback | None = None,
+) -> TransferResult:
     try:
         if item.action == Action.COPY_AND_DELETE_SOURCE:
             if item.destination is None or item.sha256 is None:
                 raise ValueError("Copy action is missing destination or hash.")
-            safe_copy_verify_delete(item.source, item.destination, item.sha256)
+            safe_copy_verify_delete(
+                item.source,
+                item.destination,
+                item.sha256,
+                progress_callback=progress_callback,
+            )
             message = f"copied and removed source: {item.source}"
             if verbose:
                 print(message)
@@ -35,7 +46,12 @@ def apply_plan_item(item: PlanItem, verbose: bool = False) -> TransferResult:
         return TransferResult(item=item, status=Status.ERROR, message=str(exc))
 
 
-def safe_copy_verify_delete(source: Path, destination: Path, expected_sha256: str) -> None:
+def safe_copy_verify_delete(
+    source: Path,
+    destination: Path,
+    expected_sha256: str,
+    progress_callback: ProgressCallback | None = None,
+) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     temp_destination = temp_path_for(destination)
 
@@ -43,7 +59,7 @@ def safe_copy_verify_delete(source: Path, destination: Path, expected_sha256: st
         temp_destination.unlink()
 
     try:
-        copy_file_bytes(source, temp_destination)
+        copy_file_bytes(source, temp_destination, progress_callback=progress_callback)
 
         source_size = source.stat().st_size
         temp_size = temp_destination.stat().st_size
@@ -52,7 +68,16 @@ def safe_copy_verify_delete(source: Path, destination: Path, expected_sha256: st
                 f"copy size mismatch for {source}: source={source_size}, copy={temp_size}"
             )
 
-        copied_sha256 = sha256_file(temp_destination)
+        copied_sha256 = sha256_file(
+            temp_destination,
+            progress_callback=(
+                lambda bytes_read, total_size: progress_callback(
+                    "verifying", bytes_read, total_size
+                )
+                if progress_callback is not None
+                else None
+            ),
+        )
         if copied_sha256 != expected_sha256:
             raise IOError(f"copy hash mismatch for {source}")
 
@@ -71,11 +96,20 @@ def temp_path_for(destination: Path) -> Path:
     return destination.with_name(f".{destination.name}.part")
 
 
-def copy_file_bytes(source: Path, destination: Path) -> None:
+def copy_file_bytes(
+    source: Path,
+    destination: Path,
+    progress_callback: ProgressCallback | None = None,
+) -> None:
+    total_size = source.stat().st_size
+    copied_size = 0
     with source.open("rb") as source_file:
         with destination.open("wb") as destination_file:
             for chunk in iter(lambda: source_file.read(COPY_CHUNK_SIZE), b""):
                 destination_file.write(chunk)
+                copied_size += len(chunk)
+                if progress_callback is not None:
+                    progress_callback("copying", copied_size, total_size)
             destination_file.flush()
             try:
                 os.fsync(destination_file.fileno())
