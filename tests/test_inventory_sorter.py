@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from inventory_sorter.cli import main
 from inventory_sorter.hashutil import sha256_file
-from inventory_sorter.transfer import safe_copy_verify_delete
+from inventory_sorter.transfer import copy_file_bytes, safe_copy_verify_delete
 
 
 class InventorySorterCliTests(unittest.TestCase):
@@ -108,6 +108,26 @@ class InventorySorterCliTests(unittest.TestCase):
 
             self.assertFalse(source.exists())
             self.assertEqual(destination.read_bytes(), b"bytes")
+
+    def test_copy_file_bytes_reports_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source.bin"
+            destination = root / "destination.bin"
+            source.write_bytes(b"a" * 2048)
+            events: list[tuple[str, int, int]] = []
+
+            copy_file_bytes(
+                source,
+                destination,
+                progress_callback=lambda stage, current, total: events.append(
+                    (stage, current, total)
+                ),
+            )
+
+            self.assertEqual(destination.read_bytes(), source.read_bytes())
+            self.assertTrue(events)
+            self.assertEqual(events[-1], ("copying", 2048, 2048))
 
 
 def run_cli(*args: str) -> int:

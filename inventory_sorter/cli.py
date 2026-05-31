@@ -12,6 +12,9 @@ from .planner import build_plan, format_plan_item
 from .scanner import scan_files, validate_source_destination
 from .transfer import apply_plan_item
 
+LONG_FILE_PROGRESS_DELAY_SECONDS = 10.0
+LONG_FILE_PROGRESS_INTERVAL_SECONDS = 1.0
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
@@ -118,7 +121,13 @@ def scan_command(args: argparse.Namespace) -> int:
         for index, item in enumerate(plan, start=1):
             print_progress(index, total, item, started)
             manifest.write_plan(item)
-            result = apply_plan_item(item, verbose=args.verbose)
+            reporter = LongFileProgressReporter()
+            result = apply_plan_item(
+                item,
+                verbose=args.verbose,
+                progress_callback=reporter.update,
+            )
+            reporter.finish()
             manifest.write_result(result)
             results.append(result)
             if result.status == Status.ERROR:
@@ -167,3 +176,48 @@ def print_progress(index: int, total: int, item, started: float) -> None:
     if elapsed > 0 and index > 1:
         rate = index / elapsed
         print(f"  progress: {rate:.2f} files/sec", flush=True)
+
+
+class LongFileProgressReporter:
+    def __init__(self) -> None:
+        self.started = monotonic()
+        self.last_print = 0.0
+        self.did_print = False
+
+    def update(self, stage: str, current: int, total: int) -> None:
+        now = monotonic()
+        elapsed = now - self.started
+        if elapsed < LONG_FILE_PROGRESS_DELAY_SECONDS:
+            return
+        if now - self.last_print < LONG_FILE_PROGRESS_INTERVAL_SECONDS and current < total:
+            return
+
+        self.last_print = now
+        self.did_print = True
+        percent = (current / total * 100) if total else 100.0
+        bar = progress_bar(percent)
+        print(
+            f"\r  {stage} {bar} {percent:5.1f}% "
+            f"({format_bytes(current)} / {format_bytes(total)})",
+            end="",
+            flush=True,
+        )
+
+    def finish(self) -> None:
+        if self.did_print:
+            print("", flush=True)
+
+
+def progress_bar(percent: float, width: int = 20) -> str:
+    filled = min(width, max(0, round(width * percent / 100)))
+    return "[" + ("#" * filled) + ("." * (width - filled)) + "]"
+
+
+def format_bytes(value: int) -> str | None:
+    amount = float(value)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if amount < 1024 or unit == "TB":
+            if unit == "B":
+                return f"{int(amount)} {unit}"
+            return f"{amount:.1f} {unit}"
+        amount /= 1024
